@@ -1,1 +1,7 @@
 # signed-images-demo
+
+Configuration
+- DOCKERHUB_USERNAME
+- DOCKERHUB_PASSWORD
+- DOCKERHUB_TOKEN
+- COSIGN_PRIVATE_KEY
