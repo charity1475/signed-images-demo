@@ -58,7 +58,7 @@ jobs:
         run: mvn test
 
   ###########################################################################
-  # 3. DOCKER BUILD
+  # 3. DOCKER BUILD AND PUSH
   ###########################################################################
   docker-build:
     runs-on: ubuntu-latest
@@ -71,7 +71,17 @@ jobs:
         with:
           name: app-jar
 
-      - uses: docker/setup-buildx-action@v2
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3.6.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3.11.1
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - id: docker_meta
         uses: docker/metadata-action@v5.7.0
@@ -82,79 +92,25 @@ jobs:
             type=sha,format=long
             type=raw,value=${{ github.run_number }}
 
-      - name: Build Image (no push)
-        uses: docker/build-push-action@v4
+      - name: Build and Push container images
+        uses: docker/build-push-action@v6.18.0
+        id: build-and-push
         with:
+          platforms: linux/amd64,linux/arm/v7,linux/arm64
+          push: true
           context: .
           file: Dockerfile
-          push: false
           tags: ${{ steps.docker_meta.outputs.tags }}
 
-      # Export image to artifact for next job
-      - name: Export Docker Image
+      - name: Sign image with a key
         run: |
-          docker save \
-            ${{ secrets.DOCKERHUB_USERNAME }}/signed-images-demo:latest \
-            ${{ secrets.DOCKERHUB_USERNAME }}/signed-images-demo:${{ github.run_number }} \
-            ${{ secrets.DOCKERHUB_USERNAME }}/signed-images-demo:sha-$(git rev-parse --short=40 HEAD) \
-            -o image.tar
-
-      - uses: actions/upload-artifact@v3
-        with:
-          name: docker-image
-          path: image.tar
-
-  ###########################################################################
-  # 4. PUBLISH TO DOCKER HUB (manual approval)
-  ###########################################################################
-  publish-image:
-    runs-on: ubuntu-latest
-    needs: docker-build
-    environment:
-      name: production
-      url: https://hub.docker.com/r/${{ secrets.DOCKERHUB_USERNAME }}/signed-images-demo
-    steps:
-      - uses: actions/checkout@v3
-
-      - uses: actions/download-artifact@v3
-        with:
-          name: docker-image
-
-      - name: Load image
-        run: docker load -i image.tar
-
-      - name: Login to DockerHub
-        uses: docker/login-action@v1
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push image to DockerHub
-        run: |
-          for tag in ${{ steps.docker_meta.outputs.tags }}; do
-            echo "Pushing $tag"
-            docker push "$tag"
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
           done
-
-  ###########################################################################
-  # 5. COSIGN SIGNING (runs after publish)
-  ###########################################################################
-  sign-image:
-    runs-on: ubuntu-latest
-    needs: publish-image
-    steps:
-      - uses: sigstore/cosign-installer@v4
-        with:
-          cosign-release: 'v3.0.2'
-
-      - name: Decode cosign private key
-        run: |
-          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 --decode > cosign.key
-          chmod 600 cosign.key
-
-      - name: Sign Docker Image
-        run: |
-          for tag in ${{ steps.docker_meta.outputs.tags }}; do
-            echo "Signing $tag"
-            cosign sign --key cosign.key "$tag"
-          done
+          cosign sign --yes --key env://COSIGN_PRIVATE_KEY ${images}
+        env:
+          TAGS: ${{ steps.docker_meta.outputs.tags }}
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
